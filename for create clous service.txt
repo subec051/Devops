@@ -1,0 +1,94 @@
+workflow ForDev-CreateCloudService
+{
+	# By default, errors in PowerShell do not cause workflows to suspend, like exceptions do.
+	# This means a runbook can still reach 'completed' state, even if it encounters errors
+	# during execution. The below command will cause all errors in the runbook to be thrown as
+	# exceptions, therefore causing the runbook to suspend when an error is hit.
+	$ErrorActionPreference = "Stop"   
+    
+    $AzureConnectionName = "C2DevManagement"
+    $SubscriptionName = "01sc_DEV_SAM"    
+    $StorageAccount = "scottsafetydevbuildc2"    
+    $CertforService = Get-AutomationCertificate -Name 'ScottConnectCert'
+    
+    $Slot = "Production"
+    $Location = "East US"
+    $BlobContainer = "mydeployments"
+    
+    $TempFolder = "$env:SYSTEMDRIVE\temp"
+	$XMLFile = "AzureDeploymentPackages_DEV.xml"
+    $TempXMLFile = "$TempFolder\$XMLFile"
+        
+    
+	$AzureConn = Get-AutomationConnection -Name $AzureConnectionName 
+    if ($AzureConn -eq $null)
+    { 
+        throw "Could not retrieve '$AzureConnectionName' connection asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Get the Azure management certificate that is used to connect to this subscription 
+    $Certificate = Get-AutomationCertificate -Name $AzureConn.AutomationCertificateName 
+    if ($Certificate -eq $null) 
+    { 
+        throw "Could not retrieve '$AzureConn.AutomationCertificateName' certificate asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Set the Azure subscription configuration 
+    Set-AzureSubscription -SubscriptionName $SubscriptionName -SubscriptionId $AzureConn.SubscriptionID -Certificate $Certificate -CurrentStorageAccountName $StorageAccount
+    Select-AzureSubscription -SubscriptionName $SubscriptionName
+        
+    If (Test-Path $TempXMLFile) {
+        Remove-Item $TempXMLFile
+        Write-Output "Removed $TempXMLFile which already exists"        
+    }
+	
+
+    Get-AzureStorageBlobContent -blob $XMLFile -Container $BlobContainer -Destination $TempXMLFile -Force
+    If (Test-Path $TempXMLFile) {
+        Write-Output "XML file $TempXMLFile synced from blob "
+    }
+      
+   
+    $XmlData = [xml](Get-Content $TempXMLFile)
+    $XmlData.Modules.Module | foreach { 
+    
+        $CloudService = $_.HostedServiceName
+        $PackageName = $_.PackageName
+        $StorageName = $_.StorageServiceName		
+		$DeployCert = $_.DeployCertForService
+    
+        
+		Write-Output "Cloud Service - $CloudService has to be deployed with package - $PackageName from blob stored in $StorageName"					
+		
+		$FileName = [io.path]::GetFileNameWithoutExtension($PackageName)
+			
+		$ConfigBlob = "$FileName.cscfg"
+		$Package_Url = (Get-AzureStorageBlob -blob $PackageName -Container $BlobContainer).ICloudBlob.uri.AbsoluteUri
+		
+		$TempConfigFile = "$TempFolder\ServiceConfiguration.Cloud.cscfg"
+		
+		If (Test-Path $TempConfigFile) {
+			Remove-Item $TempConfigFile
+			Write-Output "Removed $TempConfigFile which already exists"        
+		}
+		
+		Get-AzureStorageBlobContent -blob $ConfigBlob -Container $BlobContainer -Destination $TempConfigFile -Force
+	 
+		New-AzureService -ServiceName $CloudService -Location $Location -Label "From-Script"
+		         
+		if ($DeployCert -eq 'True'){
+			Write-Output "Certificate needs to be applied"
+            Add-AzureCertificate -ServiceName $CloudService -CertToDeploy $CertforService
+		}
+		else {
+			Write-Output "No need for certificate"
+		}
+		
+	
+		New-AzureDeployment -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label "Deployed-From-Blob"
+		
+		Write-Output "Done with CS creation and deployment"	
+	
+    }
+	    
+}

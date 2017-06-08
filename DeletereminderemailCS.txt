@@ -1,0 +1,29 @@
+workflow Delete-ReminderEmail-CS
+{
+    $ErrorActionPreference = "Stop"
+		    
+    $AzureConnectionName = "C2QAManagement"
+    $SubscriptionName = "03sc_QA_SAM"
+    $StorageAccount = "scottsafetyqac2"
+	 
+	$AzureConn = Get-AutomationConnection -Name $AzureConnectionName 
+    if ($AzureConn -eq $null)
+    { 
+        throw "Could not retrieve '$AzureConnectionName' connection asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Get the Azure management certificate that is used to connect to this subscription 
+    $Certificate = Get-AutomationCertificate -Name $AzureConn.AutomationCertificateName 
+    if ($Certificate -eq $null) 
+    { 
+        throw "Could not retrieve '$AzureConn.AutomationCertificateName' certificate asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Set the Azure subscription configuration 
+    Set-AzureSubscription -SubscriptionName $SubscriptionName -SubscriptionId $AzureConn.SubscriptionID -Certificate $Certificate -CurrentStorageAccountName $StorageAccount    
+    Select-AzureSubscription -SubscriptionName $SubscriptionName | Write-Verbose
+
+	# Get cloud service whose DeploymentName has value of "ReminderEmailForLicenseExpiry" & delete it
+    Get-AzureService | Get-AzureDeployment | Where {$_.DeploymentName -eq "ReminderEmailForLicenseExpiry"} | Remove-AzureService -Force
+	
+}

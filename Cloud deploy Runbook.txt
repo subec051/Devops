@@ -1,0 +1,239 @@
+workflow Create-Deploy-CloudService
+{
+	# By default, errors in PowerShell do not cause workflows to suspend, like exceptions do.
+	# This means a runbook can still reach 'completed' state, even if it encounters errors
+	# during execution. The below command will cause all errors in the runbook to be thrown as
+	# exceptions, therefore causing the runbook to suspend when an error is hit.
+	$ErrorActionPreference = "Stop"
+    
+    # variable to capture script start time
+    $GlobalStart = [System.DateTime]::Now
+    
+    # Holiday list got from Azure variable    
+    [string] $BLRHolidays = Get-AutomationVariable -Name 'BLRHolidays'
+    [string] $Day = (Get-Date).DayOfWeek
+    [string] $Today = Get-Date -format "dd MMM"
+    
+    Write-Output "`nToday is $Day, $Today"
+        
+    if ($Day -eq 'Saturday' -or $Day -eq 'Sunday'){
+        Write-Output "`nToday is week end ($Day), script exits here" 
+        exit 
+    }
+    elseif ($BLRHolidays -split ',' -contains $Today)
+    {
+        Write-Output "`nToday is holiday in Bangalore ($Today, $Day), script exits here"
+        exit
+    }
+    
+
+    # Subscription related variables
+    $AzureConnectionName = "C2DevManagement"
+    $SubscriptionName = "01sc_DEV_SAM"    
+    $StorageAccount = "scottsafetydevbuildc2"    
+    $CertforService = Get-AutomationCertificate -Name 'ScottConnectCert'
+    
+    # Cloud Service deployment related variables
+    $Slot = "Production"
+    $Location = "East US"
+    $BlobContainer = "mydeployments"
+    
+    # Temp deployment variables
+    $TempFolder = "$env:SYSTEMDRIVE\temp"
+	$XMLFile = "AzureDeploymentPackages_DEV.xml"
+    $TempXMLFile = "$TempFolder\$XMLFile"
+    
+    # Email related variables
+    [string] $ErrorException = "Starting execution of Create-Deploy-CloudService script`n"
+    [string] $EmailIDsTo = Get-AutomationVariable -Name EmailIDsForSuccess    
+    $Subject = "SAM Dev Environment -- SUCCESS - Creation and Deployment of Cloud Services"
+        
+    
+	$AzureConn = Get-AutomationConnection -Name $AzureConnectionName 
+    if ($AzureConn -eq $null)
+    { 
+        throw "Could not retrieve '$AzureConnectionName' connection asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Get the Azure management certificate that is used to connect to this subscription 
+    $Certificate = Get-AutomationCertificate -Name $AzureConn.AutomationCertificateName 
+    if ($Certificate -eq $null) 
+    { 
+        throw "Could not retrieve '$AzureConn.AutomationCertificateName' certificate asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Set the Azure subscription configuration 
+    Set-AzureSubscription -SubscriptionName $SubscriptionName -SubscriptionId $AzureConn.SubscriptionID -Certificate $Certificate -CurrentStorageAccountName $StorageAccount
+    Select-AzureSubscription -SubscriptionName $SubscriptionName
+            
+    If (Test-Path $TempXMLFile) {
+        Remove-Item $TempXMLFile
+        Write-Output "`nRemoved $TempXMLFile which already exists"        
+    }
+	
+
+    Get-AzureStorageBlobContent -blob $XMLFile -Container $BlobContainer -Destination $TempXMLFile -Force
+    If (Test-Path $TempXMLFile) {
+        Write-Output "`nXML file $TempXMLFile synced from blob "
+    }
+          
+       
+    $XmlData = [xml](Get-Content $TempXMLFile)
+    Parallel
+    {    
+        foreach ($xml in $XmlData.Modules.Module) 
+        {
+            
+            $LocalStart = [System.DateTime]::Now
+        
+            $CloudService = $xml.HostedServiceName
+            $PackageName = $xml.PackageName
+            $StorageName = $xml.StorageServiceName		
+    		$DeployCert = $xml.DeployCertForService
+            $DeployName = $xml.DeploymentName
+            
+            # Cloud service to host Reminder Email functionality will be
+            # created/deployed & deleted on different timing, hence this Runbook can skip it 
+            if ($DeployName -ne "ReminderEmailForLicenseExpiry")
+            {        
+            
+	    		Write-Output "`nCloud Service - $CloudService has to be deployed with package - $PackageName from blob stored in $StorageName"					
+	    		
+	    		$FileName = [io.path]::GetFileNameWithoutExtension($PackageName)
+	    			
+	    		$ConfigBlob = "$FileName.cscfg"
+	    		$Package_Url = (Get-AzureStorageBlob -blob $PackageName -Container $BlobContainer).ICloudBlob.uri.AbsoluteUri
+	    		
+	    		$TempConfigFile = "$TempFolder\ServiceConfiguration.Cloud.cscfg"
+	    		
+	    		If (Test-Path $TempConfigFile) {
+	    			Remove-Item $TempConfigFile
+	    			Write-Output "`nRemoved $TempConfigFile which already exists"        
+	    		}
+	    		
+	    		Get-AzureStorageBlobContent -blob $ConfigBlob -Container $BlobContainer -Destination $TempConfigFile -Force    	 
+	    		
+	            try
+	            {
+	                # Check CloudService already created  
+	                $AzureService = Get-AzureService -ServiceName $CloudService -ErrorAction SilentlyContinue
+	                
+	                # If CloudService exists already, skip creating it again
+	                if(!$AzureService) {
+	                    New-AzureService -ServiceName $CloudService -Location $Location -Label "From-Script" -ErrorAction stop
+	                }
+	        		         
+	        		if ($DeployCert -eq 'True'){
+	        			Write-Output "`nCertificate needs to be applied"
+	                    Add-AzureCertificate -ServiceName $CloudService -CertToDeploy $CertforService -ErrorAction stop
+	        		}
+	        		else {
+	        			Write-Output "`nNo need for certificate"
+	        		}
+	        		
+	                # Try deploying package on the cloud service
+	                # If Production slot is already deployed it will throw exception which is captured in Catch block        	
+	        		#New-AzureDeployment -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label "Deployed-From-Blob" -ErrorAction stop
+	                New-AzureDeployment -Name $DeployName -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label "Deployed-From-Blob" -ErrorAction stop
+	                
+	                # Everything went well, set parameters to send a success mail
+	                $excep = "`n`nSuccessfuly created and deployed cloud service - $CloudService`n"
+	                Write-Output "$excep"
+	                $workflow:ErrorException += $excep                
+	            }
+	            
+	            # Catch if there is any exception during deployment
+	            catch
+	            {
+	                # Write the exception as message in the output
+	                $excep1 = "***$_.Exception.GetType()***"
+	                Write-Output "`n`n'$excep1`n`n"
+	                
+	                # If exception is about production slot already occupied, then try upgrading it
+	                if ($excep1 -match "The specified deployment slot Production is occupied")
+	                {
+	                    Write-Output "`nProduction slot of $CloudService is already occupied, hence try to upgrade`n"
+	                    try
+	                    {
+	                        # Upgrade deployment in the Production slot
+	                        Set-AzureDeployment -Upgrade -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label "Update-From-Blob" -ErrorAction stop
+	                    }
+	                    catch
+	                    {
+	                        # Any exception during upgrade in Production slot, capture it for failure mail
+	                        $excep2 = "`n**********`nGot an exception while upgrading $Slot of $cloudService `n`n$_.Exception.GetType()`n**********`n`n`n"
+	                                 
+	                        Write-Output "$excep2"
+	                        $workflow:ErrorException += $excep2
+	                        
+	                        $workflow:EmailIDsTo = Get-AutomationVariable -Name 'EmailIDsForFailure'
+	                        $workflow:Subject = "SAM Dev Environment -- FAILURE - Creation and Deployment of Cloud Services"
+	                    } 
+	                }
+	                # May be some exception like Azure needs exclusive access
+	                # Try new deployment once again after 15 seconds sleep
+	                else
+	                {
+	                    Start-Sleep -Seconds 15
+	                                                                
+	                    try
+	                    {
+	                        # Second try to deploy the cloud service
+	                        New-AzureDeployment -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label "Deployed-From-Blob" -ErrorAction stop
+	                    }
+	                    catch
+	                    {
+	                        # Got an exception again, log it and send info in the failure mail
+	                        $excep3 = "`n**********`nGot an exception while deploying $cloudService `n`n$_.Exception.GetType()`n**********`n`n`n"
+	                                 
+	                        Write-Output "$excep3"
+	                        $workflow:ErrorException += $excep3
+	                        
+	                        $workflow:EmailIDsTo = Get-AutomationVariable -Name 'EmailIDsForFailure'
+	                        $workflow:Subject = "SAM Dev Environment -- FAILURE - Creation and Deployment of Cloud Services"
+	                    }
+	                }
+	            }
+            
+                $LocalFinish = [System.DateTime]::Now 
+            	$LocalTotalUsed = $LocalFinish.Subtract($LocalStart).TotalMinutes
+                $LocalFinishMsg = "`nCompleted activity for {0} in {1} minutes.`n" -f $CloudService, $LocalTotalUsed
+                
+                Write-Output "$LocalFinishMsg"
+                $workflow:ErrorException += $LocalFinishMsg
+            }
+        }
+    }
+    
+    # Restart all instances so IIS get started after AppInsight Agent installation
+    # this try...catch block will be removed after InstallAgent.ps1 fix
+    try
+    {
+        #Get-AzureService | Get-AzureRole -InstanceDetails | ReSet-AzureRoleInstance -Slot "Production" –reboot
+    }
+    catch 
+    {
+        $ErrorException += "`n=====`nException while restarting instances`n - $_.Exception.GetType()`n=====`n"
+    }
+    
+            
+    $GlobalFinish = [System.DateTime]::Now 
+	$GlobalTotalUsed = $GlobalFinish.Subtract($GlobalStart).TotalMinutes
+    $FinishMsg = "`n`n`nCompleted Create-Deploy-CloudService script execution in {0} minutes." -f $GlobalTotalUsed
+                     
+    Write-Output "$FinishMsg"
+    $ErrorException += $FinishMsg
+    
+    InlineScript{
+            $EmailTo = $using:EmailIDsTo
+            $EmailFrom = "AzureAutomationScript@tycoint.com"
+            $SMTPServer = "smtp.sendgrid.net"
+            $SMTPClient = New-Object Net.Mail.SmtpClient($SMTPServer, 587)
+            $SMTPClient.EnableSsl = $true
+            $SMTPClient.Credentials = New-Object System.Net.NetworkCredential("azure_cb2018dd6c45e618eeb7a3b62a0e2cd9@azure.com", ("4dvQX863r2pKmlR" | ConvertTo-SecureString -AsPlainText -Force));
+         
+            $Body = $using:ErrorException
+            $SMTPMessage = New-Object System.Net.Mail.MailMessage($EmailFrom,$EmailTo,$using:Subject,$Body)
+            $SMTPClient.Send($SMTPMessage)
+        }	
+}

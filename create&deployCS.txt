@@ -1,0 +1,163 @@
+<#
+.SYNOPSIS
+    Create Cloud Service and deploy application
+
+.DESCRIPTION
+   Creates a cloud service if not exist before and deploys specific cloud package if specified slot is free
+   
+.PARAMETER Subscription
+    Object which has Subscription properties in Key-Value pair
+
+.PARAMETER AzureCS
+    Object which has Cloud Service properties in Key-Value pair                 
+#>
+
+workflow CreateAndDeployCS
+{
+	#Output string which captures the execution status
+	[OutputType([string])]
+	
+	#Parameters
+	Param
+	(
+        [Parameter (Mandatory = $true)]
+        [Object]$Subscription,
+
+        [Parameter (Mandatory = $true)]
+        [Object]$AzureCS
+	)
+
+    $TempFolder = "$env:SYSTEMDRIVE\temp"
+
+    # Subscription variable
+    $SubscriptionName = $Subscription.Name
+    $SubscriptionID = $Subscription.ID
+    $StorageName = $Subscription.StorageServiceName
+    $DeployCert = $Subscription.DeployCertForService
+    $BlobContainer = $Subscription.BlobContainer    
+    $Certificate = $Subscription.Certificate
+        
+    # Cloud Service variable    
+    $CloudService = $AzureCS.CloudService
+    $PackageName = $AzureCS.PackageName  
+    $Slot = $AzureCS.Slot
+    $Location = $AzureCS.Location  
+    $DeployName = $AzureCS.DeploymentName
+    $DeployLabel = $AzureCS.DeployLabel
+    $DeployCert = $AzureCS.DeployCert
+    $CertforService = $AzureCS.CertforService
+    
+    $LocalStart = [System.DateTime]::Now
+
+    # Set the Azure subscription configuration 
+    Set-AzureSubscription -SubscriptionName $SubscriptionName -SubscriptionId $SubscriptionID -Certificate $Certificate -CurrentStorageAccountName $StorageName
+    Select-AzureSubscription -SubscriptionName $SubscriptionName        
+            
+    Write-Output "`r`nCloud Service - $CloudService has to be deployed with package - $PackageName from blob stored in $StorageName`r`n"
+    $FileName = [io.path]::GetFileNameWithoutExtension($PackageName)
+    			
+    $ConfigBlob = "$FileName.cscfg"
+    $Package_Url = (Get-AzureStorageBlob -blob $PackageName -Container $BlobContainer).ICloudBlob.uri.AbsoluteUri
+    		
+    $TempConfigFile = "$TempFolder\ServiceConfiguration.Cloud.cscfg"
+    		
+    If (Test-Path $TempConfigFile) {
+    	Remove-Item $TempConfigFile
+    	Write-Verbose "`nRemoved $TempConfigFile which already exists"        
+    }
+    		
+    Get-AzureStorageBlobContent -blob $ConfigBlob -Container $BlobContainer -Destination $TempConfigFile -Force
+    		
+    try
+    {
+        # Check CloudService already created  
+        $AzureService = Get-AzureService -ServiceName $CloudService -ErrorAction SilentlyContinue
+                
+        # If CloudService exists already, skip creating it again
+        if(!$AzureService) {
+            New-AzureService -ServiceName $CloudService -Location $Location -Label $DeployLabel -ErrorAction stop
+        }
+        		         
+        if ($DeployCert -eq 'True'){
+        	Write-Verbose "`nCertificate needs to be applied"
+            Add-AzureCertificate -ServiceName $CloudService -CertToDeploy $CertforService -ErrorAction stop
+        }
+        else {
+        	Write-Verbose "`nNo need for certificate"
+        }
+        		
+        # Try deploying package on the cloud service
+        # If Production slot is already deployed it will throw exception which is captured in Catch block
+        New-AzureDeployment -Name $DeployName -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label $DeployLabel -ErrorAction stop
+                
+        # Everything went well, set parameters to send a success mail
+        $excep = "`r`nSuccessfuly created and deployed cloud service - $CloudService`r`n"
+        Write-Verbose "$excep"
+		Write-Output $excep
+        $ErrorException += $excep                
+    }
+            
+    # Catch if there is any exception during deployment
+    catch
+    {
+        # Write the exception as message in the output
+        $excep1 = "***$_.Exception.GetType()***"
+        Write-Verbose "`n`n'$excep1`n`n"
+                
+        # If exception is about production slot already occupied, then try upgrading it
+        if ($excep1 -match "The specified deployment slot Production is occupied")
+        {
+            Write-Verbose "`nProduction slot of $CloudService is already occupied, hence try to upgrade`n"
+            try
+            {
+                # Upgrade deployment in the Production slot
+                #Set-AzureDeployment -Upgrade -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label "Update-From-Blob" -ErrorAction stop -Verbose:$false
+            }
+            catch
+            {
+                # Any exception during upgrade in Production slot, capture it for failure mail
+                $excep2 = "`r`n**********`nGot an exception while upgrading $Slot of $cloudService `n`n$_.Exception.GetType()`n**********`n`r`n"
+                                 
+                Write-Verbose "$excep2"
+				Write-Output $excep2
+                $ErrorException += $excep2                
+            } 
+        }
+        # May be some exception like Azure needs exclusive access
+        # Try new deployment once again after 15 seconds sleep
+        else
+        {
+            Start-Sleep -Seconds 15
+                                                                
+            try
+            {
+                # Second try to deploy the cloud service
+                New-AzureDeployment -Slot $Slot -Package $Package_Url -Configuration $TempConfigFile -ServiceName $CloudService -Label $DeployLabel -ErrorAction stop
+            }
+            catch
+            {
+                # Got an exception again, log it and send info in the failure mail
+                $excep3 = "`r`n**********`nGot an exception while deploying $cloudService `n`n$_.Exception.GetType()`n**********`n`r`n"
+                                 
+                Write-Verbose "$excep3"
+				Write-Output $excep3
+                $ErrorException += $excep3
+            }
+        }
+    }			
+        
+    $LocalFinish = [System.DateTime]::Now 
+    $LocalTotalUsed = $LocalFinish.Subtract($LocalStart).TotalMinutes
+    $LocalFinishMsg = "`r`nCompleted activity for {0} in {1} minutes.`r`n" -f $CloudService, $LocalTotalUsed
+            
+    Write-Verbose "$LocalFinishMsg"
+	Write-Output $LocalFinishMsg
+    $ErrorException += $LocalFinishMsg	
+	
+#	$ErrorException -split “`r`n” | ForEach { if ($_ -notmatch "Microsoft") {$CSReturn += "`r`n{0}" -f $_}}
+	#$CSReturn = $ErrorException -split “`r`n” | ForEach { if ($_ -notmatch "Microsoft") {echo $_}}
+	$ErrorException -split [Environment]::NewLine
+	foreach ($line in $ErrorException) { if ($line -notlike "*Microsoft*") {$CSReturn += "`n$line"}}
+	
+	#Write-Output $CSReturn
+}

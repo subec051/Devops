@@ -1,0 +1,133 @@
+workflow Create-Deploy-ReminderEmail
+{
+    # By default, errors in PowerShell do not cause workflows to suspend, like exceptions do.
+	# This means a runbook can still reach 'completed' state, even if it encounters errors
+	# during execution. The below command will cause all errors in the runbook to be thrown as
+	# exceptions, therefore causing the runbook to suspend when an error is hit.
+	$ErrorActionPreference = "Stop"
+    
+    # variable to capture script start time
+    $GlobalStart = [System.DateTime]::Now
+    
+    # Holiday list got from Azure variable    
+    [string] $BLRHolidays = Get-AutomationVariable -Name 'BLRHolidays'
+    [string] $Day = (Get-Date).DayOfWeek
+    [string] $Today = Get-Date -format "dd MMM"
+    
+    Write-Output "`nToday is $Day, $Today"
+        
+    if ($Day -eq 'Saturday' -or $Day -eq 'Sunday'){
+        Write-Output "`nToday is week end ($Day), script exits here" 
+        exit 
+    }
+    elseif ($BLRHolidays -split ',' -contains $Today)
+    {
+        Write-Output "`nToday is holiday in Bangalore ($Today, $Day), script exits here"
+        exit
+    }
+    
+
+    # Subscription related variables
+    $AzureConnectionName = "C2DevManagement"
+    $SubscriptionName = "01sc_DEV_SAM"
+	$SubscriptionID = "b7e903c2-5703-48a0-8946-b067523ee4a0"
+    $StorageAccount = "scottsafetydevbuildc2"    
+    $BlobContainer = "mydeployments"
+	$CertforService = Get-AutomationCertificate -Name 'ScottConnectCert'
+    
+    # Cloud Service deployment related variables
+    $Slot = "Production"
+    $Location = "East US"
+    
+    
+    # Temp deployment variables
+    $TempFolder = "$env:SYSTEMDRIVE\temp"
+	$XMLFile = "AzureDeploymentPackages_DEV_SAM.xml"
+    $TempXMLFile = "$TempFolder\$XMLFile"
+    
+    # Email related variables
+    [string] $Body = "Starting execution of Create-Deploy-CloudService script`r`n"
+    [string] $EmailIDsTo = Get-AutomationVariable -Name EmailIDsForSuccess    
+    $Subject = "SAM Dev Environment -- SUCCESS - Creation and Deployment of Cloud Services"
+        
+    
+	$AzureConn = Get-AutomationConnection -Name $AzureConnectionName 
+    if ($AzureConn -eq $null)
+    { 
+        throw "Could not retrieve '$AzureConnectionName' connection asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Get the Azure management certificate that is used to connect to this subscription 
+    $Certificate = Get-AutomationCertificate -Name $AzureConn.AutomationCertificateName 
+    if ($Certificate -eq $null) 
+    { 
+        throw "Could not retrieve '$AzureConn.AutomationCertificateName' certificate asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Set the Azure subscription configuration 
+    Set-AzureSubscription -SubscriptionName $SubscriptionName -SubscriptionId $SubscriptionID -Certificate $Certificate -CurrentStorageAccountName $StorageAccount
+    Select-AzureSubscription -SubscriptionName $SubscriptionName
+	            
+    If (Test-Path $TempXMLFile) {
+        Remove-Item $TempXMLFile
+        Write-Output "`nRemoved $TempXMLFile which already exists"        
+    }
+	
+
+    Get-AzureStorageBlobContent -blob $XMLFile -Container $BlobContainer -Destination $TempXMLFile -Force
+    If (Test-Path $TempXMLFile) {
+        Write-Output "`nXML file $TempXMLFile synced from blob "
+    }
+          
+       
+    $XmlData = [xml](Get-Content $TempXMLFile)
+    Parallel
+    {    
+        foreach ($xml in $XmlData.Modules.Module) 
+        {
+            
+            $LocalStart = [System.DateTime]::Now
+        
+            $CloudService = $xml.HostedServiceName
+            $PackageName = $xml.PackageName
+            $StorageName = $xml.StorageServiceName		
+    		$DeployCert = $xml.DeployCertForService
+            $DeploymentName = $xml.DeploymentName
+			$DeployLabel = "Deployed from blob"
+            
+            # Only Cloud service to host Reminder Email functionality will be
+            # created & deployed by this runbook, because of different scheduled time 
+            if ($DeploymentName -eq "ReminderEmailForLicenseExpiry")
+            {
+				$C2DevSub = @{"Name"=$SubscriptionName;"ID"=$SubscriptionID;"StorageServiceName"=$StorageName;"Certificate"=$Certificate;"BlobContainer"=$BlobContainer}				
+				$C2CloudService = @{"CloudService"=$CloudService;"PackageName"=$PackageName;"Slot"=$Slot;"Location"=$Location;"DeploymentName"=$DeploymentName;"DeployLabel"=$DeployLabel;"CertforService"=$CertforService}
+			
+				$CSReturn= CreateAndDeployCS -Subscription $C2DevSub -AzureCS $C2CloudService				
+								
+				if ($CSReturn -like "*exception*")
+				{
+					$workflow:Subject = "SAM Dev Environment -- FAILURE - Creation and Deployment of Cloud Services"	
+					$workflow:EmailIDsTo = Get-AutomationVariable -Name 'EmailIDsForFailure'					
+				}
+				else 
+				{
+					$CSReturn -split [Environment]::NewLine
+					foreach ($line in $CSReturn) { if ($line -like "*Microsoft*") {} else {$Temp += "`r`n$line"}}
+					$CSReturn = $Temp
+				}
+				$workflow:Body += $CSReturn
+			}
+		}
+    }
+                
+    $GlobalFinish = [System.DateTime]::Now 
+	$GlobalTotalUsed = $GlobalFinish.Subtract($GlobalStart).TotalMinutes
+    $FinishMsg = "`n`r`nCompleted Create-Deploy-CloudService script execution in {0} minutes." -f $GlobalTotalUsed
+                     
+    Write-Output "$FinishMsg"
+    
+	$Body += $FinishMsg
+    $EmailFrom = "AzureAutomationScript@tycoint.com"
+	
+	SendGridEmail -EmailFrom $EmailFrom -EmailTo $EmailIDsTo -EmailSubject $Subject -EmailBody $Body    
+}

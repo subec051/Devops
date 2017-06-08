@@ -1,0 +1,129 @@
+
+workflow test_runbook
+{   
+	# By default, errors in PowerShell do not cause workflows to suspend, like exceptions do.
+	# This means a runbook can still reach 'completed' state, even if it encounters errors
+	# during execution. The below command will cause all errors in the runbook to be thrown as
+	# exceptions, therefore causing the runbook to suspend when an error is hit.
+	$ErrorActionPreference = "Stop"
+    <#$AzureConnectionName = "C2DevManagement"
+    $SubscriptionName = "01sc_DEV_SAM"
+	
+	$AzureConn = Get-AutomationConnection -Name $AzureConnectionName 
+    if ($AzureConn -eq $null)
+    { 
+        throw "Could not retrieve '$AzureConnectionName' connection asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Get the Azure management certificate that is used to connect to this subscription 
+    $Certificate = Get-AutomationCertificate -Name $AzureConn.AutomationCertificateName 
+    if ($Certificate -eq $null) 
+    { 
+        throw "Could not retrieve '$AzureConn.AutomationCertificateName' certificate asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Set the Azure subscription configuration 
+    Set-AzureSubscription -SubscriptionName $SubscriptionName -SubscriptionId $AzureConn.SubscriptionID -Certificate $Certificate
+    Select-AzureSubscription -SubscriptionName $SubscriptionName | Write-Verbose
+
+	# Get all Azure VMs in the subscription, and output each VM's name
+	Get-AzureStorageAccount | select StorageAccountName
+	#>
+	############################################################
+	<#
+.SYNOPSIS
+    Create Cloud Service and deploy application
+
+.DESCRIPTION
+   Creates a cloud service if not exist before and deploys specific cloud package if specified slot is free
+   
+.PARAMETER SubscriptionName
+    Subscription where Cloud Service to be created
+
+.PARAMETER CloudService
+    Name for the Cloud Service to be created
+
+.PARAMETER Location
+    Geo-location where the Cloud Service will get created
+
+.PARAMETER Slot
+    Deployment slot (Production/Staging) in Cloud Service where application will be deployed
+	
+.PARAMETER PackageName
+	PackageName (.cspkg) where application to be deployed is available
+	
+.PARAMETER DeploymentName
+	Value for Deployment Name parameter in Cloud Service
+	
+.PARAMETER AddCert
+	Boolean to say whether certificate has to be deployed for the cloud service
+	
+.PARAMETER Certificate
+	Certificate to be added to cloud service if AddCert is True
+                 
+#>       
+
+	
+	$AzureConnectionName = "C2DevManagement"
+    $SubscriptionName = "01sc_DEV_SAM"
+	$SubscriptionID = "b7e903c2-5703-48a0-8946-b067523ee4a0"
+	$StorageName = "scottsafetydevbuildc2"
+	$BlobContainer = "mydeployments"
+		
+	Write-Output "Starting test_runbook"
+		
+	$AzureConn = Get-AutomationConnection -Name $AzureConnectionName 
+    if ($AzureConn -eq $null)
+    { 
+        throw "Could not retrieve '$AzureConnectionName' connection asset. Check that you created this first in the Automation service." 
+    } 
+ 
+    # Get the Azure management certificate that is used to connect to this subscription 
+    $Certificate = Get-AutomationCertificate -Name $AzureConn.AutomationCertificateName 
+    if ($Certificate -eq $null) 
+    { 
+        throw "Could not retrieve '$AzureConn.AutomationCertificateName' certificate asset. Check that you created this first in the Automation service." 
+    } 
+    
+	$C2DevSub = @{"Name"=$SubscriptionName;"ID"=$SubscriptionID;"StorageServiceName"=$StorageName;"Certificate"=$Certificate;"BlobContainer"=$BlobContainer}
+	
+	# Cloud Service variable    
+    $CloudService = "ReminderLicExp"
+    $PackageName = "ScottSafety.Core.CustomerProvision.cspkg"
+    $Slot = "Production"
+    $Location = "East US"  
+    $DeploymentName = "ReminderEmailForLicenseExpiry"
+    $DeployLabel = "Deployed from blob"
+    $DeployCert = $true
+    $CertforService = Get-AutomationCertificate -Name 'ScottConnectCert'
+    $C2CloudService = @{"CloudService"=$CloudService;"PackageName"=$PackageName;"Slot"=$Slot;"Location"=$Location;"DeploymentName"=$DeploymentName;"DeployLabel"=$DeployLabel;"CertforService"=$CertforService}
+	
+	Write-Output "Before call to CreateAndDeployCS runbook"
+	$Body = CreateAndDeployCS -Subscription $C2DevSub -AzureCS $C2CloudService
+	Write-Output "After calling CreateAndDeployCS runbook"
+	############################################################
+	    
+    $EmailIDsTo = "msrivastava@tycoint.com"
+    $EmailFrom = "AzureAutomationScript@tycoint.com"
+    <#$SMTPServer = "smtp.sendgrid.net"
+    $SMTPClient = New-Object Net.Mail.SmtpClient($SMTPServer, 587)
+    $SMTPClient.EnableSsl = $true
+    $SMTPClient.Credentials = New-Object System.Net.NetworkCredential("azure_cb2018dd6c45e618eeb7a3b62a0e2cd9@azure.com", ("4dvQX863r2pKmlR" | ConvertTo-SecureString -AsPlainText -Force))
+ #>
+    #$Body = "Message body"
+	if ($Body -like "*exception*")
+	{
+		$Subject = "Deployment failed"		
+	}
+	else
+	{
+		$Subject = "Successfully deployed"
+	}
+	
+    #$SMTPMessage = New-Object System.Net.Mail.MailMessage($EmailFrom,$EmailIDsTo,$Subject,$Body)
+    #$SMTPClient.Send($SMTPMessage)
+	
+	Write-Output "Before call to SendGridEmail runbook"
+	SendGridEmail -EmailFrom $EmailFrom -EmailTo $EmailIDsTo -EmailSubject $Subject -EmailBody $Body
+	Write-Output "After call to SendGridEmail runbook"	
+}

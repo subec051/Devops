@@ -1,0 +1,38 @@
+https://qa8.foliodx.com/brokerage/AControlServlet
+
+https://qa8.foliodx.com/brokerage/AControlServlet
+noustester
+Noustester123
+
+Jenkins URL
+url : http://10.11.100.130:8080/
+
+nousdev/Fdx1234
+
+
+Hi,
+
+This is to inform you that folklore HRIS access has been enabled for updating the personal details.
+
+Your user name: NT173529 
+Password: b97kRyc2GQ
+
+ 
+Please log into the Folklore HRIS at http://folklore.nousinfo.com with the new password.
+
+Thanks And Regards,
+Team HR
+
+Master : Jenkins
+UID :jslave
+Pwd:nous123
+
+Slave : Docker/jenkins
+UID:slaved	
+Pwd:nous123
+
+
+CVS path:
+
+/home/cvs/repository/fdsrc2008 
+10.11.100.122
